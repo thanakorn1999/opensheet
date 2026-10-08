@@ -20,6 +20,7 @@
         <MenuItem Header="_Copy" InputGesture="Ctrl+C" Click="OnCopyClick" />
         <MenuItem Header="_Paste" InputGesture="Ctrl+V" Click="OnPasteClick" />
         <MenuItem Header="_Delete" InputGesture="Delete" Click="OnClearClick" />
+        <MenuItem Header="Select _All" InputGesture="Ctrl+A" Click="OnSelectAllClick" />
         <Separator />
         <MenuItem Header="_Edit Cell" InputGesture="F2" Click="OnEditCellClick" />
         <MenuItem Header="_Find…" InputGesture="Ctrl+F" Click="OnFindClick" />
@@ -28,10 +29,17 @@
         <MenuItem Header="_Next Sheet" InputGesture="Ctrl+PageDown" Click="OnNextSheetClick" />
         <MenuItem Header="_Previous Sheet" InputGesture="Ctrl+PageUp" Click="OnPrevSheetClick" />
         <Separator />
+        <MenuItem Header="Ne_w Sheet" InputGesture="Shift+F11" Click="OnNewSheetClick" />
         <MenuItem Header="_Rename Sheet…" Click="OnRenameSheetClick" />
         <MenuItem Header="_Duplicate Sheet…" Click="OnDuplicateSheetClick" />
+        <MenuItem Header="Delete S_heet" Click="OnDeleteSheetClick" />
+        <MenuItem Header="Move Sheet _Left" Click="OnMoveSheetLeftClick" />
+        <MenuItem Header="Move Sheet Righ_t" Click="OnMoveSheetRightClick" />
         <Separator />
-        <MenuItem Header="Delete _Columns…" Click="OnDeleteColumnsClick" />
+        <MenuItem Header="Insert Rows _Above" Click="OnInsertRowsClick" />
+        <MenuItem Header="Insert C_olumns Left" Click="OnInsertColumnsClick" />
+        <MenuItem Header="Delete Ro_ws" Click="OnDeleteRowsClick" />
+        <MenuItem Header="Delete _Columns" Click="OnDeleteColumnsClick" />
       </MenuItem>
       <MenuItem Header="_Data">
         <MenuItem Header="Find _Duplicates…" Click="OnFindDuplicatesClick" />
@@ -39,8 +47,8 @@
     </Menu>
 
     <!-- Formula bar -->
-    <Grid DockPanel.Dock="Top" ColumnDefinitions="70,*" Margin="4">
-      <TextBlock x:Name="AddressText" VerticalAlignment="Center" HorizontalAlignment="Center" Text="A1" />
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="110,*" Margin="4">
+      <TextBlock x:Name="AddressText" VerticalAlignment="Center" HorizontalAlignment="Center" Text="A1" TextTrimming="CharacterEllipsis" />
       <!-- Shows the selected cell's content; mirrors the in-cell editor while typing. -->
       <TextBox x:Name="FormulaBox" Grid.Column="1" IsReadOnly="True" />
     </Grid>
@@ -52,9 +60,15 @@
     <!-- One-line input for sheet commands (rename, duplicate, delete columns) -->
     <TextBox x:Name="PromptBox" DockPanel.Dock="Top" Margin="4,0,4,4" IsVisible="False" />
 
-    <!-- Sheet tabs (double-click to rename) + status -->
+    <!-- Sheet tabs (double-click to rename, right-click for more) + new-sheet button + status -->
     <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto" Margin="4,2">
-      <TabStrip x:Name="SheetTabs" SelectionChanged="OnSheetChanged" />
+      <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+        <StackPanel Orientation="Horizontal">
+          <TabStrip x:Name="SheetTabs" SelectionChanged="OnSheetChanged" />
+          <Button Content="+" ToolTip.Tip="New sheet (Shift+F11)" Click="OnNewSheetClick"
+                  VerticalAlignment="Center" Margin="4,0" Padding="10,2" />
+        </StackPanel>
+      </ScrollViewer>
       <TextBlock x:Name="StatusText" Grid.Column="1" VerticalAlignment="Center" Margin="8,0" />
     </Grid>
 

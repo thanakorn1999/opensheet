@@ -398,7 +398,7 @@ public class WorkbookDocumentTests
     }
 
     [Fact]
-    public void CopyCell_ShiftsRelativeReferences()
+    public void Ranges_CopyCutClearAndText()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.xlsx");
         using (var wb = new XLWorkbook())
@@ -407,18 +407,39 @@ public class WorkbookDocumentTests
             ws.Cell("A1").Value = 1;
             ws.Cell("A2").Value = 2;
             ws.Cell("B1").FormulaA1 = "A1*10+$A$1";
+            ws.Cell("B2").Value = "007"; // text that looks like a number
             wb.SaveAs(path);
         }
 
         try
         {
             using var doc = WorkbookDocument.Open(path);
-            doc.CopyCell(0, 1, 2, 0, 2, 2);   // B1 -> B2
-            Assert.Equal(new CellView("21", "=A2*10+$A$1", true), doc.GetCell(0, 2, 2));
-            doc.CopyCell(0, 1, 1, 0, 3, 1);   // value A1 -> A3
-            Assert.Equal("1", doc.GetCell(0, 3, 1).Text);
+            string Content(int r, int c) => doc.GetCell(0, r, c).Content ?? "";
+            const int Max = 1_048_576;
+
+            Assert.Equal("1\t11\n2\t007", doc.RangeText(0, 1, 1, Max, 2)); // whole columns shrink to used area
+            Assert.Equal((1, 1, 2, 2), doc.UsedPart(0, 1, 1, Max, 16_384));
+            Assert.Null(doc.UsedPart(0, 5, 5, 9, 9));
+
+            Assert.Equal((2, 2), doc.CopyRange(0, 1, 1, Max, 2, 0, 1, 4)); // A:B -> D1
+            Assert.Equal("=D1*10+$A$1", Content(1, 5));                    // relative ref shifted, absolute kept
+            Assert.Equal("007", Content(2, 5));                             // text stays text
             Assert.True(doc.Undo());
-            Assert.Equal(default, doc.GetCell(0, 3, 1));
+            Assert.Equal(default, doc.GetCell(0, 1, 4));
+
+            doc.CopyRange(0, 1, 1, 2, 2, 0, 2, 2, move: true);              // cut A1:B2 -> B2 (overlaps)
+            Assert.Equal(["", "", "", "1"], new[] { Content(1, 1), Content(1, 2), Content(2, 1), Content(2, 2) });
+            Assert.Equal("=A1*10+$A$1", Content(2, 3));                     // cut keeps formula as written
+            Assert.Equal("007", Content(3, 3));
+            Assert.True(doc.Undo());                                        // one step restores both ends
+            Assert.Equal(["1", "=A1*10+$A$1", "2", "007"], new[] { Content(1, 1), Content(1, 2), Content(2, 1), Content(2, 2) });
+            Assert.Equal(default, doc.GetCell(0, 2, 3));
+
+            doc.ClearRange(0, 1, 1, Max, 1);                                // clear column A
+            Assert.Equal(default, doc.GetCell(0, 2, 1));
+            Assert.Equal("=A1*10+$A$1", Content(1, 2));
+            Assert.True(doc.Undo());
+            Assert.Equal("2", Content(2, 1));
         }
         finally { File.Delete(path); }
     }
@@ -444,6 +465,100 @@ public class WorkbookDocumentTests
             Assert.Equal((9, 1), doc.JumpEdge(0, 7, 1, 1, 0)); // nothing below: edge of used range
             Assert.Equal((1, 1), doc.JumpEdge(0, 1, 1, -1, 0)); // already at top
             Assert.Equal((1, 4), doc.JumpEdge(0, 1, 1, 0, 1));  // right edge
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Sheets_AddDeleteMove()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.xlsx");
+        using (var wb = new XLWorkbook())
+        {
+            wb.AddWorksheet("Sheet1");
+            wb.AddWorksheet("Data");
+            wb.SaveAs(path);
+        }
+
+        try
+        {
+            using var doc = WorkbookDocument.Open(path);
+            Assert.Equal("Sheet2", doc.AddSheet(1));            // "Sheet1" taken
+            Assert.Equal(["Sheet1", "Sheet2", "Data"], doc.SheetNames);
+            Assert.Equal("Notes", doc.AddSheet(3, "Notes"));
+            doc.MoveSheet(3, 0);
+            Assert.Equal(["Notes", "Sheet1", "Sheet2", "Data"], doc.SheetNames);
+            doc.DeleteSheet(2);
+            Assert.Equal(["Notes", "Sheet1", "Data"], doc.SheetNames);
+            Assert.True(doc.Undo());
+            Assert.Equal(["Notes", "Sheet1", "Sheet2", "Data"], doc.SheetNames);
+
+            doc.DeleteSheet(0); doc.DeleteSheet(0); doc.DeleteSheet(0);
+            Assert.Throws<InvalidOperationException>(() => doc.DeleteSheet(0)); // last one stays
+            Assert.Equal(["Data"], doc.SheetNames);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void InsertRowsAndColumns_ShiftCellsFormulasAndHyperlinks()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.xlsx");
+        using (var wb = new XLWorkbook())
+        {
+            var ws = wb.AddWorksheet("S");
+            for (int r = 3; r >= 1; r--) // bottom-up: the ClosedXML link-shift trap
+            {
+                ws.Cell(r, 1).Value = r;
+                ws.Cell(r, 2).SetHyperlink(new XLHyperlink($"https://example.com/{r}"));
+            }
+            ws.Cell("C1").FormulaA1 = "SUM(A1:A3)";
+            wb.SaveAs(path);
+        }
+
+        try
+        {
+            using (var doc = WorkbookDocument.Open(path))
+            {
+                doc.InsertRows(0, 2, 2);    // two rows above row 2
+                Assert.Equal(["1", "", "", "2", "3"], Enumerable.Range(1, 5).Select(r => doc.GetCell(0, r, 1).Text ?? ""));
+                Assert.Equal("=SUM(A1:A5)", doc.GetCell(0, 1, 3).Content);
+                doc.InsertColumns(0, 1, 1); // one column left of A
+                Assert.Equal("1", doc.GetCell(0, 1, 2).Text);
+                Assert.Equal("=SUM(B1:B5)", doc.GetCell(0, 1, 4).Content);
+                doc.SaveAs(path);
+            }
+
+            using var wb2 = new XLWorkbook(path);
+            Assert.Equal("https://example.com/1", wb2.Worksheet(1).Cell(1, 3).GetHyperlink().ExternalAddress.ToString());
+            Assert.Equal("https://example.com/2", wb2.Worksheet(1).Cell(4, 3).GetHyperlink().ExternalAddress.ToString());
+            Assert.Equal("https://example.com/3", wb2.Worksheet(1).Cell(5, 3).GetHyperlink().ExternalAddress.ToString());
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Formulas_WithWholeColumnRowAndRangeReferences()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.xlsx");
+        using (var wb = new XLWorkbook())
+        {
+            var ws = wb.AddWorksheet("S");
+            ws.Cell("A1").Value = 1; ws.Cell("A2").Value = 2; ws.Cell("A3").Value = 3;
+            ws.Cell("B1").Value = 10; ws.Cell("C1").Value = 100;
+            wb.SaveAs(path);
+        }
+
+        try
+        {
+            using var doc = WorkbookDocument.Open(path);
+            doc.SetCell(0, 5, 5, "=SUM(A:A)");   // what clicking the A header inserts
+            doc.SetCell(0, 6, 5, "=SUM(1:1)");   // row header
+            doc.SetCell(0, 7, 5, "=SUM(A1:B3)"); // dragged range
+            doc.SetCell(0, 8, 5, "=SUM(A:B)");   // dragged across headers
+            Assert.Equal(["6", "111", "16", "16"], Enumerable.Range(5, 4).Select(r => doc.GetCell(0, r, 5).Text));
+            doc.SetCell(0, 4, 1, "4");           // whole-column formulas update
+            Assert.Equal("10", doc.GetCell(0, 5, 5).Text);
         }
         finally { File.Delete(path); }
     }

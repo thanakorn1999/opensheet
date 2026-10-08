@@ -71,25 +71,28 @@ public sealed class WorkbookDocument : IDisposable
     void Edit(Func<UndoStep> undo, Action change) => Edit(undo, () => { change(); return 0; });
 
     /// <summary>Undo for cell edits: remembers just these cells' values/formulas (formatting isn't touched by edits).</summary>
-    UndoStep CellsStep(int sheet, IReadOnlyList<(int Row, int Col)> cells)
+    UndoStep CellsStep(IReadOnlyList<(int Sheet, int Row, int Col)> cells)
     {
-        var ws = Sheet(sheet);
-        var saved = cells.Select(p => ws.Cell(p.Row, p.Col))
-            .Select(c => (c.Address.RowNumber, c.Address.ColumnNumber, Formula: c.HasFormula ? c.FormulaA1 : null, Value: c.HasFormula ? (XLCellValue)Blank.Value : c.Value))
+        var saved = cells.Select(p => (p, Cell: Sheet(p.Sheet).Cell(p.Row, p.Col)))
+            .Select(x => (x.p, Formula: x.Cell.HasFormula ? x.Cell.FormulaA1 : null, Value: x.Cell.HasFormula ? (XLCellValue)Blank.Value : x.Cell.Value))
             .ToList();
         return () =>
         {
-            var redo = CellsStep(sheet, cells);
-            var target = Sheet(sheet);
-            foreach (var (r, c, formula, value) in saved)
+            var redo = CellsStep(cells);
+            foreach (var (p, formula, value) in saved)
             {
-                var cell = target.Cell(r, c);
+                var cell = Sheet(p.Sheet).Cell(p.Row, p.Col);
                 if (formula is not null) cell.FormulaA1 = formula;
                 else cell.Value = value; // also drops a formula
             }
             return redo;
         };
     }
+
+    static List<(int Sheet, int Row, int Col)> Cells(int sheet, int top, int left, int bottom, int right) =>
+        [.. from r in Enumerable.Range(top, Math.Max(0, bottom - top + 1))
+            from c in Enumerable.Range(left, Math.Max(0, right - left + 1))
+            select (sheet, r, c)];
 
     /// <summary>Undo for structural edits (rows, columns, sheets): a full copy of the workbook.</summary>
     // ponytail: copies the whole file per step; fine for normal sheets, record finer steps if huge files feel slow.
@@ -136,13 +139,13 @@ public sealed class WorkbookDocument : IDisposable
     /// </summary>
     // ponytail: dates and percentages stay text until someone types one and expects otherwise.
     public void SetCell(int sheet, int row, int col, string input) =>
-        Edit(() => CellsStep(sheet, [(row, col)]), () => Put(sheet, row, col, input));
+        Edit(() => CellsStep([(sheet, row, col)]), () => Put(sheet, row, col, input));
 
     /// <summary>Pastes a block of typed values (e.g. tab-separated text from Excel) with its top-left at (row, col). One undo step.</summary>
     public void SetCells(int sheet, int row, int col, IReadOnlyList<IReadOnlyList<string>> block)
     {
-        var cells = block.SelectMany((line, r) => line.Select((_, c) => (row + r, col + c))).ToList();
-        Edit(() => CellsStep(sheet, cells), () =>
+        var cells = block.SelectMany((line, r) => line.Select((_, c) => (sheet, row + r, col + c))).ToList();
+        Edit(() => CellsStep(cells), () =>
         {
             for (int r = 0; r < block.Count; r++)
                 for (int c = 0; c < block[r].Count; c++)
@@ -150,16 +153,62 @@ public sealed class WorkbookDocument : IDisposable
         });
     }
 
-    /// <summary>Copies one cell's value or formula like Excel's paste: relative references shift with the move.</summary>
-    public void CopyCell(int fromSheet, int fromRow, int fromCol, int toSheet, int toRow, int toCol)
+    /// <summary>The part of a range that has data (whole columns/rows shrink to the used area). Null if none.</summary>
+    public (int Top, int Left, int Bottom, int Right)? UsedPart(int sheet, int top, int left, int bottom, int right)
     {
-        var src = Sheet(fromSheet).Cell(fromRow, fromCol);
-        Edit(() => CellsStep(toSheet, [(toRow, toCol)]), () =>
+        var (rows, cols) = UsedSize(sheet);
+        bottom = Math.Min(bottom, rows);
+        right = Math.Min(right, cols);
+        return bottom < top || right < left ? null : (top, left, bottom, right);
+    }
+
+    /// <summary>Clears values/formulas in a range (formatting stays). One undo step.</summary>
+    public void ClearRange(int sheet, int top, int left, int bottom, int right)
+    {
+        if (UsedPart(sheet, top, left, bottom, right) is not { } u) return;
+        var cells = Cells(sheet, u.Top, u.Left, u.Bottom, u.Right);
+        Edit(() => CellsStep(cells), () =>
         {
-            var dst = Sheet(toSheet).Cell(toRow, toCol);
-            if (src.HasFormula) dst.FormulaR1C1 = src.FormulaR1C1; // R1C1 is relative, so A1 refs shift
-            else dst.Value = src.Value;
+            foreach (var (_, r, c) in cells) Sheet(sheet).Cell(r, c).Value = Blank.Value;
         });
+    }
+
+    /// <summary>A range's displayed text as tab-separated lines, the way Excel puts it on the clipboard.</summary>
+    public string RangeText(int sheet, int top, int left, int bottom, int right)
+    {
+        if (UsedPart(sheet, top, left, bottom, right) is not { } u) return "";
+        return string.Join("\n", Enumerable.Range(u.Top, u.Bottom - u.Top + 1).Select(r =>
+            string.Join('\t', Enumerable.Range(u.Left, u.Right - u.Left + 1).Select(c => GetCell(sheet, r, c).Text ?? ""))));
+    }
+
+    /// <summary>
+    /// Pastes a range with its top-left at (toRow, toCol), like Excel. Copy shifts relative references;
+    /// <paramref name="move"/> (cut) keeps formulas as written and clears the source. Values keep their type.
+    /// One undo step. Returns the pasted size.
+    /// </summary>
+    // ponytail: values and formulas only; formatting isn't copied.
+    public (int Rows, int Cols) CopyRange(int fromSheet, int top, int left, int bottom, int right, int toSheet, int toRow, int toCol, bool move = false)
+    {
+        if (UsedPart(fromSheet, top, left, bottom, right) is not { } u) return (0, 0);
+        int rows = u.Bottom - u.Top + 1, cols = u.Right - u.Left + 1;
+        var src = Cells(fromSheet, u.Top, u.Left, u.Bottom, u.Right);
+        var dst = Cells(toSheet, toRow, toCol, toRow + rows - 1, toCol + cols - 1);
+        Edit(() => CellsStep(move ? [.. src, .. dst] : dst), () =>
+        {
+            // Read everything first so overlapping source and destination don't clobber each other.
+            var data = src.Select(p => Sheet(p.Sheet).Cell(p.Row, p.Col))
+                .Select(c => (Formula: c.HasFormula ? (move ? c.FormulaA1 : c.FormulaR1C1) : null, c.Value))
+                .ToList();
+            if (move) foreach (var (s, r, c) in src) Sheet(s).Cell(r, c).Value = Blank.Value;
+            for (int i = 0; i < dst.Count; i++)
+            {
+                var cell = Sheet(toSheet).Cell(dst[i].Row, dst[i].Col);
+                if (data[i].Formula is not { } f) cell.Value = data[i].Value;
+                else if (move) cell.FormulaA1 = f;
+                else cell.FormulaR1C1 = f; // R1C1 is relative, so A1 references shift
+            }
+        });
+        return (rows, cols);
     }
 
     void Put(int sheet, int row, int col, string input)
@@ -191,16 +240,45 @@ public sealed class WorkbookDocument : IDisposable
 
     public void DeleteColumns(int sheet, IEnumerable<int> cols) => Edit(SnapshotStep, () => DeleteLines(sheet, cols, byRow: false));
 
+    /// <summary>Inserts <paramref name="count"/> empty rows above row <paramref name="before"/>; formulas adjust.</summary>
+    public void InsertRows(int sheet, int before, int count) => Edit(SnapshotStep, () =>
+        WithLinksDetached(Sheet(sheet), byRow: true,
+            ws => ws.Row(before).InsertRowsAbove(count),
+            line => line >= before ? line + count : line));
+
+    /// <summary>Inserts <paramref name="count"/> empty columns left of column <paramref name="before"/>; formulas adjust.</summary>
+    public void InsertColumns(int sheet, int before, int count) => Edit(SnapshotStep, () =>
+        WithLinksDetached(Sheet(sheet), byRow: false,
+            ws => ws.Column(before).InsertColumnsBefore(count),
+            line => line >= before ? line + count : line));
+
     // ponytail: one ClosedXML delete per row/column; batch contiguous runs if deleting thousands feels slow.
     void DeleteLines(int sheet, IEnumerable<int> lines, bool byRow)
     {
-        var ws = Sheet(sheet);
         var deleted = lines.Distinct().Order().ToList();
+        WithLinksDetached(Sheet(sheet), byRow,
+            ws =>
+            {
+                for (int i = deleted.Count - 1; i >= 0; i--) // last first keeps the other numbers valid
+                    if (byRow) ws.Row(deleted[i]).Delete();
+                    else ws.Column(deleted[i]).Delete();
+            },
+            line =>
+            {
+                int i = deleted.BinarySearch(line);
+                return i >= 0 ? null : line - ~i; // gone, or moved up/left by the deleted lines before it (~i)
+            });
+    }
 
-        // ClosedXML 0.105 shifts hyperlinks one at a time in storage order and throws "same key" when a link
-        // moves onto one that hasn't moved yet. So detach them all, delete, then re-attach where they shifted to.
-        // Detaching resets font color/underline, so remember those too.
-        // ponytail: a link spanning several cells comes back on its top-left cell only.
+    /// <summary>
+    /// Runs a row/column insert or delete with hyperlinks detached. ClosedXML 0.105 shifts hyperlinks one at a
+    /// time in storage order and throws "same key" when a link moves onto one that hasn't moved yet. So detach
+    /// them all, make the change, then re-attach each at <paramref name="newLine"/>(its row or column), or drop it
+    /// when that's null. Detaching resets font color/underline, so those are restored too.
+    /// </summary>
+    // ponytail: a link spanning several cells comes back on its top-left cell only.
+    static void WithLinksDetached(IXLWorksheet ws, bool byRow, Action<IXLWorksheet> change, Func<int, int?> newLine)
+    {
         var links = ws.Hyperlinks
             .Select(h => (Link: h, Cell: h.Cell!)) // links attached to a sheet always have a cell
             .Select(x => (x.Link, x.Cell.Address.RowNumber, x.Cell.Address.ColumnNumber,
@@ -208,17 +286,12 @@ public sealed class WorkbookDocument : IDisposable
             .ToList();
         foreach (var l in links) ws.Hyperlinks.Delete(l.Link);
 
-        for (int i = deleted.Count - 1; i >= 0; i--) // last first keeps the other numbers valid
-            if (byRow) ws.Row(deleted[i]).Delete();
-            else ws.Column(deleted[i]).Delete();
+        change(ws);
 
         foreach (var l in links)
         {
-            int i = deleted.BinarySearch(byRow ? l.RowNumber : l.ColumnNumber);
-            if (i >= 0) continue; // its row/column is gone
-            var cell = byRow // ~i = deleted lines before it
-                ? ws.Cell(l.RowNumber - ~i, l.ColumnNumber)
-                : ws.Cell(l.RowNumber, l.ColumnNumber - ~i);
+            if (newLine(byRow ? l.RowNumber : l.ColumnNumber) is not { } n) continue;
+            var cell = byRow ? ws.Cell(n, l.ColumnNumber) : ws.Cell(l.RowNumber, n);
             cell.SetHyperlink(l.Link);
             cell.Style.Font.FontColor = l.FontColor;
             cell.Style.Font.Underline = l.Underline;
@@ -280,6 +353,28 @@ public sealed class WorkbookDocument : IDisposable
             return name;
         });
     }
+
+    /// <summary>Adds an empty sheet at <paramref name="index"/> (0-based). Blank name picks "Sheet2", "Sheet3", … Returns the name.</summary>
+    public string AddSheet(int index, string? name = null)
+    {
+        name = NewSheetName(name, i => $"Sheet{i}");
+        return Edit(SnapshotStep, () =>
+        {
+            _wb.AddWorksheet(name).Position = index + 1;
+            return name;
+        });
+    }
+
+    /// <summary>Deletes a sheet. A workbook must keep at least one, like Excel.</summary>
+    public void DeleteSheet(int sheet)
+    {
+        if (_wb.Worksheets.Count <= 1) throw new InvalidOperationException("A workbook needs at least one sheet.");
+        Edit(SnapshotStep, () => Sheet(sheet).Delete());
+    }
+
+    /// <summary>Moves a sheet to <paramref name="index"/> (0-based) in the tab order.</summary>
+    public void MoveSheet(int sheet, int index) =>
+        Edit(SnapshotStep, () => Sheet(sheet).Position = Math.Clamp(index, 0, _wb.Worksheets.Count - 1) + 1);
 
     /// <summary>The trimmed <paramref name="requested"/> name if valid (throws if not), or when blank the first free <paramref name="auto"/>(1, 2, …).</summary>
     string NewSheetName(string? requested, Func<int, string> auto)

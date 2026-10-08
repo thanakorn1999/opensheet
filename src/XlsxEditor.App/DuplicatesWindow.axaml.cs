@@ -15,13 +15,13 @@ public partial class DuplicatesWindow : Window
     IReadOnlyList<int[]> _groups = [];
 
     // For the XAML previewer only; the app uses the constructor below.
-    public DuplicatesWindow() : this(null!, 1) { }
+    public DuplicatesWindow() : this(null!, "A") { }
 
-    public DuplicatesWindow(MainWindow main, int selectedCol)
+    public DuplicatesWindow(MainWindow main, string columns)
     {
         InitializeComponent();
         _main = main;
-        ColumnsBox.Text = WorkbookDocument.ColumnLetter(selectedCol);
+        ColumnsBox.Text = columns;
         Opened += (_, _) => { ColumnsBox.Focus(); ColumnsBox.SelectAll(); };
         Closed += (_, _) => _main.Sheet.Duplicates = null;
     }

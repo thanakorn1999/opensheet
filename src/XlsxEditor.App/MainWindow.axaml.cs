@@ -1,9 +1,13 @@
+using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.LogicalTree;
 using Avalonia.Platform.Storage;
+using Avalonia.VisualTree;
+using XlsxEditor.App.Controls;
 using XlsxEditor.Core;
 
 namespace XlsxEditor.App;
@@ -16,9 +20,10 @@ public partial class MainWindow : Window
     bool _dirty;   // edited since open/save
     DuplicatesWindow? _dupWindow;
     (int Sheet, int Row, int Col, string Original)? _editing; // cell open in the in-cell editor
-    (int Start, int End)? _pointRef; // cell reference just inserted into a formula by clicking a cell
+    (int Start, int End)? _pointRef; // reference just inserted into a formula by clicking/dragging on the sheet
+    (GridArea Area, int Row, int Col)? _pointAnchor; // where that click/drag started, while the button is down
     // What we last put on the clipboard, so pasting it back can keep formulas (the clipboard only holds text).
-    (string Text, int Sheet, int Row, int Col, string? CutContent)? _clip;
+    (string Text, int Sheet, int Top, int Left, int Bottom, int Right, bool Cut)? _clip;
     Func<string, string?>? _prompt; // PromptBox's Enter action: returns an error to show, or null when done
 
     static readonly FilePickerFileType XlsxType = new("Excel Workbook")
@@ -31,6 +36,8 @@ public partial class MainWindow : Window
     internal int CurrentSheet => SheetTabs.SelectedIndex;
     /// <summary>Bumped on every edit so other windows can tell their results are stale.</summary>
     internal int Edits { get; private set; }
+    internal bool HasUnsavedChanges => _dirty;
+    bool _closeConfirmed;
 
     public MainWindow()
     {
@@ -43,13 +50,17 @@ public partial class MainWindow : Window
         SearchBox.AddHandler(KeyDownEvent, OnSearchKeyDown, RoutingStrategies.Tunnel);
         PromptBox.AddHandler(KeyDownEvent, OnPromptKeyDown, RoutingStrategies.Tunnel);
         CellEditor.AddHandler(KeyDownEvent, OnEditorKeyDown, RoutingStrategies.Tunnel);
-        CellEditor.LostFocus += (_, _) => CommitEdit(); // clicking elsewhere saves, like Excel
+        CellEditor.LostFocus += (_, _) => { if (_pointAnchor is null) CommitEdit(); }; // clicking elsewhere saves, like Excel
         CellEditor.TextChanged += (_, _) => { if (_editing is not null) FormulaBox.Text = CellEditor.Text; };
         Sheet.KeyDown += OnSheetKeyDown;
         Sheet.AddHandler(TextInputEvent, OnSheetTextInput);
         Sheet.AddHandler(PointerPressedEvent, OnSheetPointerPressed, RoutingStrategies.Tunnel);
-        Sheet.DoubleTapped += (_, _) => BeginEdit(null);
+        Sheet.AddHandler(PointerMovedEvent, OnSheetPointerMoved, RoutingStrategies.Tunnel);
+        Sheet.AddHandler(PointerReleasedEvent, OnSheetPointerReleased, RoutingStrategies.Tunnel);
+        Sheet.DoubleTapped += (_, e) => { if (Sheet.HitTest(e.GetPosition(Sheet)) is not null) BeginEdit(null); }; // not on headers
         SheetTabs.DoubleTapped += (_, _) => RenameCurrentSheet();
+        Sheet.ContextRequested += OnSheetContextRequested;
+        SheetTabs.ContextRequested += OnTabsContextRequested;
 
         // Menus are written with Ctrl; macOS users expect Cmd. (OnKeyDown accepts either.)
         if (OperatingSystem.IsMacOS())
@@ -66,7 +77,7 @@ public partial class MainWindow : Window
         if (_doc is null || CurrentSheet < 0) return;
         var original = Sheet.SelectedCell.Content ?? "";
         _editing = (CurrentSheet, Sheet.SelectedRow, Sheet.SelectedCol, original);
-        _pointRef = null;
+        EndPointing();
         CellEditor.Text = text ?? original;
         PlaceEditor();
         CellEditor.IsVisible = true;
@@ -88,6 +99,7 @@ public partial class MainWindow : Window
     {
         if (_editing is not { } t || _doc is null) return;
         _editing = null;
+        EndPointing();
         CellEditor.IsVisible = false;
         var text = CellEditor.Text ?? "";
         // Unchanged = don't touch it: a date shows as text and would come back as text.
@@ -108,6 +120,7 @@ public partial class MainWindow : Window
     void CancelEdit()
     {
         _editing = null;
+        EndPointing();
         CellEditor.IsVisible = false;
         Sheet.Focus();
         SyncView();
@@ -121,27 +134,82 @@ public partial class MainWindow : Window
             case Key.Enter: CommitEdit(moveRows: shift ? -1 : 1); break;
             case Key.Tab: CommitEdit(moveCols: shift ? -1 : 1); break;
             case Key.Escape: CancelEdit(); break;
-            default: _pointRef = null; return; // typing ends "click to insert a reference"
+            default: EndPointing(); return; // typing ends "click to insert a reference"
         }
         e.Handled = true;
     }
 
-    // While typing a formula, clicking a cell inserts its address (clicking again swaps it), like Excel.
+    // While typing a formula, click or drag on the sheet to insert a reference, like Excel:
+    // a cell (A1), a range (A1:C5), column headers (B:B, B:D) or row headers (3:3, 3:5).
+    // Clicking again right away replaces the reference just inserted.
     void OnSheetPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (_editing is null || Sheet.HitTest(e.GetPosition(Sheet)) is not { } hit) return;
+        if (_editing is null || !e.GetCurrentPoint(Sheet).Properties.IsLeftButtonPressed) return;
+        var pos = e.GetPosition(Sheet);
+        var area = Sheet.AreaAt(pos);
+        if (area == GridArea.Corner) return;
         var text = CellEditor.Text ?? "";
         int caret = CellEditor.CaretIndex;
         bool replacing = _pointRef is { } p && p.End == caret;
         bool afterOperator = caret > 0 && "=+-*/^(,:;<>&".Contains(text[caret - 1]);
         if (!text.StartsWith('=') || !(replacing || afterOperator)) return; // normal click: commit and select
 
-        int start = replacing ? _pointRef!.Value.Start : caret;
-        var address = WorkbookDocument.Address(hit.Row, hit.Col);
-        CellEditor.Text = text[..start] + address + text[caret..];
-        CellEditor.CaretIndex = start + address.Length;
-        _pointRef = (start, start + address.Length);
-        e.Handled = true; // keep the editor open and focused
+        if (!replacing) _pointRef = (caret, caret);
+        var (row, col) = Sheet.CellAt(pos);
+        _pointAnchor = (area, row, col);
+        UpdatePointRef(row, col);
+        e.Pointer.Capture(Sheet); // keep getting moves while dragging
+        e.Handled = true;         // the grid must not select or take focus
+    }
+
+    void OnSheetPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (_pointAnchor is null) return;
+        var (row, col) = Sheet.CellAt(e.GetPosition(Sheet));
+        // Dragging past an edge scrolls, only along the axis being picked.
+        Sheet.Reveal(_pointAnchor.Value.Area == GridArea.ColumnHeader ? Sheet.FirstRow : row,
+                     _pointAnchor.Value.Area == GridArea.RowHeader ? Sheet.FirstCol : col);
+        UpdatePointRef(row, col);
+        e.Handled = true;
+    }
+
+    void OnSheetPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (_pointAnchor is null) return;
+        _pointAnchor = null;
+        e.Pointer.Capture(null);
+        if (!CellEditor.IsFocused) CellEditor.Focus(); // keep typing the formula
+        CellEditor.CaretIndex = _pointRef?.End ?? CellEditor.CaretIndex;
+        e.Handled = true;
+    }
+
+    /// <summary>Rewrites the reference being picked so it spans from the anchor to (row, col).</summary>
+    void UpdatePointRef(int row, int col)
+    {
+        if (_pointAnchor is not { } a || _pointRef is not { } span) return;
+        int top = Math.Min(a.Row, row), bottom = Math.Max(a.Row, row);
+        int left = Math.Min(a.Col, col), right = Math.Max(a.Col, col);
+        string Col(int c) => WorkbookDocument.ColumnLetter(c);
+        var (reference, box) = a.Area switch
+        {
+            GridArea.ColumnHeader => ($"{Col(left)}:{Col(right)}", (1, left, SheetGrid.MaxRows, right)),
+            GridArea.RowHeader => ($"{top}:{bottom}", (top, 1, bottom, SheetGrid.MaxCols)),
+            _ => (top == bottom && left == right
+                    ? WorkbookDocument.Address(top, left)
+                    : $"{WorkbookDocument.Address(top, left)}:{WorkbookDocument.Address(bottom, right)}",
+                (top, left, bottom, right)),
+        };
+        var text = CellEditor.Text ?? "";
+        CellEditor.Text = text[..span.Start] + reference + text[span.End..];
+        CellEditor.CaretIndex = span.Start + reference.Length;
+        _pointRef = (span.Start, span.Start + reference.Length);
+        Sheet.Reference = box;
+    }
+
+    void EndPointing()
+    {
+        _pointRef = null;
+        Sheet.Reference = null;
     }
 
     void OnSheetKeyDown(object? sender, KeyEventArgs e)
@@ -164,8 +232,16 @@ public partial class MainWindow : Window
     void ClearSelected()
     {
         if (_doc is null || CurrentSheet < 0) return;
-        _doc.SetCell(CurrentSheet, Sheet.SelectedRow, Sheet.SelectedCol, "");
+        var (top, left, bottom, right) = Sheet.Selection;
+        _doc.ClearRange(CurrentSheet, top, left, bottom, right);
         MarkEdited();
+    }
+
+    /// <summary>Selected columns as "B" or "B:D", for prefilling column inputs.</summary>
+    string SelectedColumnsText()
+    {
+        var (_, left, _, right) = Sheet.Selection;
+        return left == right ? WorkbookDocument.ColumnLetter(left) : $"{WorkbookDocument.ColumnLetter(left)}:{WorkbookDocument.ColumnLetter(right)}";
     }
 
     // ---- Undo / clipboard ----
@@ -187,40 +263,43 @@ public partial class MainWindow : Window
     async Task CopyAsync(bool cut)
     {
         if (_doc is null || CurrentSheet < 0 || Clipboard is null) return;
-        var cell = Sheet.SelectedCell;
-        var text = cell.Text ?? "";
+        var (top, left, bottom, right) = Sheet.Selection;
+        var text = _doc.RangeText(CurrentSheet, top, left, bottom, right);
         await Clipboard.SetTextAsync(text);
-        // Copy pastes with references shifted; cut pastes the exact content once.
-        _clip = (text, CurrentSheet, Sheet.SelectedRow, Sheet.SelectedCol, cut ? cell.Content ?? "" : null);
-        if (cut) ClearSelected();
-        StatusText.Text = cut ? "Cut" : "Copied";
+        // Like Excel: copy pastes with references shifted; cut moves the cells when you paste.
+        _clip = (text, CurrentSheet, top, left, bottom, right, cut);
+        StatusText.Text = cut ? $"Cut {Sheet.SelectionText} — paste to move it" : $"Copied {Sheet.SelectionText}";
     }
 
-    // ponytail: single-cell selection, so copy/cut take one cell; paste accepts a whole tab-separated block.
     async Task PasteAsync()
     {
         if (_doc is null || CurrentSheet < 0 || Clipboard is null) return;
         if (await Clipboard.TryGetTextAsync() is not { } text) return;
-        int sheet = CurrentSheet, row = Sheet.SelectedRow, col = Sheet.SelectedCol;
+        int sheet = CurrentSheet;
+        var (row, col, _, _) = Sheet.Selection; // paste at the top-left of the selection
         try
         {
+            int rows, cols;
             if (_clip is { } c && c.Text == text && c.Sheet < _doc.SheetNames.Count)
             {
-                if (c.CutContent is { } content)
-                {
-                    _doc.SetCell(sheet, row, col, content);
-                    _clip = null; // a cut pastes once
-                }
-                else _doc.CopyCell(c.Sheet, c.Row, c.Col, sheet, row, col);
+                (rows, cols) = _doc.CopyRange(c.Sheet, c.Top, c.Left, c.Bottom, c.Right, sheet, row, col, move: c.Cut);
+                if (c.Cut) _clip = null; // a cut pastes once
             }
             else
             {
                 // From another app (Excel, Sheets, a text editor): rows by line, cells by tab.
                 var lines = text.Replace("\r\n", "\n").Split('\n');
                 if (lines.Length > 1 && lines[^1].Length == 0) lines = lines[..^1];
-                _doc.SetCells(sheet, row, col, lines.Select(l => (IReadOnlyList<string>)l.Split('\t')).ToList());
+                var block = lines.Select(l => (IReadOnlyList<string>)l.Split('\t')).ToList();
+                _doc.SetCells(sheet, row, col, block);
+                (rows, cols) = (block.Count, block.Max(l => l.Count));
             }
             MarkEdited();
+            if (rows > 0)
+            {
+                Sheet.Select(row, col);
+                Sheet.Select(row + rows - 1, col + cols - 1, extend: true); // select what was pasted
+            }
             StatusText.Text = "Pasted";
         }
         catch (Exception ex) { StatusText.Text = $"Cannot paste: {ex.Message}"; }
@@ -233,6 +312,7 @@ public partial class MainWindow : Window
     async void OnPasteClick(object? sender, RoutedEventArgs e) => await PasteAsync();
     void OnClearClick(object? sender, RoutedEventArgs e) => ClearSelected();
     void OnEditCellClick(object? sender, RoutedEventArgs e) => BeginEdit(null);
+    void OnSelectAllClick(object? sender, RoutedEventArgs e) => Sheet.SelectAll();
     void OnNextSheetClick(object? sender, RoutedEventArgs e) => StepSheet(1);
     void OnPrevSheetClick(object? sender, RoutedEventArgs e) => StepSheet(-1);
 
@@ -306,18 +386,146 @@ public partial class MainWindow : Window
         });
     }
 
-    void OnDeleteColumnsClick(object? sender, RoutedEventArgs e)
+    // ---- Rows, columns, sheets (Sheet menu + right-click menus) ----
+
+    /// <summary>Runs an edit, showing failures in the status bar instead of crashing.</summary>
+    void Try(Action action)
     {
-        if (_doc is not { } doc || CurrentSheet < 0) return;
-        int sheet = CurrentSheet;
-        ShowPrompt("Columns to delete, e.g. B or B,D:F  (Enter = delete, Esc = cancel)", WorkbookDocument.ColumnLetter(Sheet.SelectedCol), text =>
+        if (_doc is null || CurrentSheet < 0) return;
+        CommitEdit();
+        try { action(); }
+        catch (Exception ex) { StatusText.Text = ex.Message; }
+    }
+
+    void InsertRows() => Try(() =>
+    {
+        var (top, _, bottom, _) = Sheet.Selection;
+        if (bottom - top + 1 >= SheetGrid.MaxRows) throw new InvalidOperationException("Select fewer rows to insert.");
+        _doc!.InsertRows(CurrentSheet, top, bottom - top + 1); // as many as are selected, like Excel
+        MarkEdited();
+    });
+
+    void InsertColumns() => Try(() =>
+    {
+        var (_, left, _, right) = Sheet.Selection;
+        if (right - left + 1 >= SheetGrid.MaxCols) throw new InvalidOperationException("Select fewer columns to insert.");
+        _doc!.InsertColumns(CurrentSheet, left, right - left + 1);
+        MarkEdited();
+    });
+
+    void DeleteRows() => Try(() =>
+    {
+        var (top, left, bottom, _) = Sheet.Selection;
+        bottom = Math.Min(bottom, _doc!.UsedSize(CurrentSheet).Rows); // rows past the data are already empty
+        if (bottom < top) return;
+        _doc.DeleteRows(CurrentSheet, Enumerable.Range(top, bottom - top + 1));
+        Sheet.Select(top, left);
+        MarkEdited();
+        StatusText.Text = $"Deleted {bottom - top + 1} rows";
+    });
+
+    void DeleteColumns() => Try(() =>
+    {
+        var (top, left, _, right) = Sheet.Selection;
+        right = Math.Min(right, _doc!.UsedSize(CurrentSheet).Cols);
+        if (right < left) return;
+        _doc.DeleteColumns(CurrentSheet, Enumerable.Range(left, right - left + 1));
+        Sheet.Select(top, left);
+        MarkEdited();
+        StatusText.Text = $"Deleted {right - left + 1} columns";
+    });
+
+    void NewSheet() => Try(() =>
+    {
+        int index = CurrentSheet + 1;
+        var name = _doc!.AddSheet(index);
+        Reload(index);
+        StatusText.Text = $"Added sheet \"{name}\"";
+    });
+
+    void DeleteSheet() => Try(() =>
+    {
+        var name = _doc!.SheetNames[CurrentSheet];
+        int index = CurrentSheet;
+        _doc.DeleteSheet(index);
+        Reload(Math.Min(index, _doc.SheetNames.Count - 1));
+        StatusText.Text = $"Deleted sheet \"{name}\" (Cmd/Ctrl+Z to undo)";
+    });
+
+    void MoveSheet(int delta) => Try(() =>
+    {
+        int to = Math.Clamp(CurrentSheet + delta, 0, _doc!.SheetNames.Count - 1);
+        if (to == CurrentSheet) return;
+        _doc.MoveSheet(CurrentSheet, to);
+        Reload(to);
+    });
+
+    void OnNewSheetClick(object? sender, RoutedEventArgs e) => NewSheet();
+    void OnDeleteSheetClick(object? sender, RoutedEventArgs e) => DeleteSheet();
+    void OnMoveSheetLeftClick(object? sender, RoutedEventArgs e) => MoveSheet(-1);
+    void OnMoveSheetRightClick(object? sender, RoutedEventArgs e) => MoveSheet(1);
+    void OnInsertRowsClick(object? sender, RoutedEventArgs e) => InsertRows();
+    void OnInsertColumnsClick(object? sender, RoutedEventArgs e) => InsertColumns();
+    void OnDeleteRowsClick(object? sender, RoutedEventArgs e) => DeleteRows();
+    void OnDeleteColumnsClick(object? sender, RoutedEventArgs e) => DeleteColumns();
+
+    static ContextMenu Menu(params (string Header, Action Run)?[] items)
+    {
+        var menu = new ContextMenu();
+        foreach (var item in items)
         {
-            if (WorkbookDocument.ParseColumns(text) is not { } cols) return "Invalid columns — use e.g. B or B,D:F";
-            doc.DeleteColumns(sheet, cols);
-            MarkEdited();
-            StatusText.Text = $"Deleted column {string.Join(", ", cols.Select(WorkbookDocument.ColumnLetter))}";
-            return null;
-        });
+            if (item is not { } i)
+            {
+                menu.Items.Add(new Separator());
+                continue;
+            }
+            var mi = new MenuItem { Header = i.Header };
+            mi.Click += (_, _) => i.Run();
+            menu.Items.Add(mi);
+        }
+        return menu;
+    }
+
+    void OnSheetContextRequested(object? sender, ContextRequestedEventArgs e)
+    {
+        if (_doc is null) return;
+        CommitEdit();
+        var area = e.TryGetPosition(Sheet, out var p) ? Sheet.AreaAt(p) : GridArea.Cell;
+        (string, Action)? cut = ("Cut", () => _ = CopyAsync(cut: true)),
+            copy = ("Copy", () => _ = CopyAsync(cut: false)),
+            paste = ("Paste", () => _ = PasteAsync()),
+            clear = ("Clear Contents", ClearSelected),
+            insertRows = ("Insert Rows Above", InsertRows),
+            insertCols = ("Insert Columns Left", InsertColumns),
+            deleteRows = ("Delete Rows", DeleteRows),
+            deleteCols = ("Delete Columns", DeleteColumns);
+        var menu = area switch
+        {
+            GridArea.ColumnHeader => Menu(cut, copy, paste, null, insertCols, deleteCols, clear, null,
+                ("Find Duplicates in These Columns…", () => OnFindDuplicatesClick(null, new RoutedEventArgs()))),
+            GridArea.RowHeader => Menu(cut, copy, paste, null, insertRows, deleteRows, clear),
+            _ => Menu(cut, copy, paste, null, insertRows, insertCols, deleteRows, deleteCols, clear, null,
+                ("Edit Cell", () => BeginEdit(null))),
+        };
+        menu.Open(Sheet);
+        e.Handled = true;
+    }
+
+    void OnTabsContextRequested(object? sender, ContextRequestedEventArgs e)
+    {
+        if (_doc is null) return;
+        // Right-clicking a tab acts on that tab, so select it first.
+        if ((e.Source as Visual)?.FindAncestorOfType<TabStripItem>(includeSelf: true) is { } tab
+            && SheetTabs.IndexFromContainer(tab) is >= 0 and var index)
+            SheetTabs.SelectedIndex = index;
+        Menu(("New Sheet", NewSheet),
+             ("Rename…", RenameCurrentSheet),
+             ("Duplicate…", () => OnDuplicateSheetClick(null, new RoutedEventArgs())),
+             ("Delete", DeleteSheet),
+             null,
+             ("Move Left", () => MoveSheet(-1)),
+             ("Move Right", () => MoveSheet(1))).Open(SheetTabs);
+        e.Handled = true;
     }
 
     void ShowSearch()
@@ -358,12 +566,13 @@ public partial class MainWindow : Window
 
     public async Task OpenAsync(string path)
     {
+        if (!await ConfirmDiscardAsync()) return;
         StatusText.Text = "Opening…";
         try
         {
             var doc = await Task.Run(() => WorkbookDocument.Open(path));
             var old = _doc;
-            _editing = null;
+            CancelEdit();
             HidePrompt();
             _doc = doc;
             _dirty = false;
@@ -377,6 +586,71 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             StatusText.Text = $"Cannot open: {ex.Message}";
+        }
+    }
+
+    // ---- Unsaved changes ----
+
+    /// <summary>True when it's fine to drop the current file: nothing unsaved, or the user saved or chose not to.</summary>
+    async Task<bool> ConfirmDiscardAsync()
+    {
+        if (!_dirty || _doc is null) return true;
+        switch (await AskSaveAsync())
+        {
+            case true:
+                await SaveAsync(pick: false);
+                return !_dirty; // still dirty = save failed or was cancelled
+            case false: return true;
+            default: return false;
+        }
+    }
+
+    /// <summary>Save / Don't Save / Cancel → true / false / null.</summary>
+    async Task<bool?> AskSaveAsync()
+    {
+        bool? result = null;
+        var dialog = new Window
+        {
+            Title = "Unsaved changes",
+            SizeToContent = SizeToContent.WidthAndHeight,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+        };
+        Button Choice(string text, bool? value, bool isDefault = false)
+        {
+            var b = new Button { Content = text, IsDefault = isDefault, IsCancel = value is null };
+            b.Click += (_, _) => { result = value; dialog.Close(); };
+            return b;
+        }
+        dialog.Content = new StackPanel
+        {
+            Margin = new Thickness(20),
+            Spacing = 16,
+            Children =
+            {
+                new TextBlock { Text = $"Save changes to \"{Path.GetFileName(_doc?.Path)}\" before closing it?" },
+                new StackPanel
+                {
+                    Orientation = Avalonia.Layout.Orientation.Horizontal,
+                    HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+                    Spacing = 8,
+                    Children = { Choice("Don't Save", false), Choice("Cancel", null), Choice("Save", true, isDefault: true) },
+                },
+            },
+        };
+        await dialog.ShowDialog(this);
+        return result;
+    }
+
+    protected override async void OnClosing(WindowClosingEventArgs e)
+    {
+        base.OnClosing(e);
+        if (_closeConfirmed || !_dirty) return;
+        e.Cancel = true; // ask first, then close for real
+        if (await ConfirmDiscardAsync())
+        {
+            _closeConfirmed = true;
+            Close();
         }
     }
 
@@ -424,7 +698,7 @@ public partial class MainWindow : Window
         HScroll.Value = Sheet.FirstCol;
         _syncing = false;
 
-        AddressText.Text = WorkbookDocument.Address(Sheet.SelectedRow, Sheet.SelectedCol);
+        AddressText.Text = Sheet.SelectionText;
         if (_editing is null) FormulaBox.Text = Sheet.SelectedCell.Content;
         else PlaceEditor(); // follow the cell when scrolling
     }
@@ -438,7 +712,7 @@ public partial class MainWindow : Window
             _dupWindow.Activate();
             return;
         }
-        _dupWindow = new DuplicatesWindow(this, Sheet.SelectedCol);
+        _dupWindow = new DuplicatesWindow(this, SelectedColumnsText());
         _dupWindow.Closed += (_, _) => _dupWindow = null;
         _dupWindow.Show(this);
     }
@@ -498,6 +772,12 @@ public partial class MainWindow : Window
     protected override async void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
+        if (!e.Handled && e.Key == Key.F11 && e.KeyModifiers == KeyModifiers.Shift)
+        {
+            e.Handled = true;
+            NewSheet(); // Excel's shortcut
+            return;
+        }
         // Ctrl on Windows, Cmd on macOS (either works on both).
         if (e.Handled || (!e.KeyModifiers.HasFlag(KeyModifiers.Control) && !e.KeyModifiers.HasFlag(KeyModifiers.Meta))) return;
         bool shift = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
