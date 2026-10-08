@@ -1,0 +1,33 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="XlsxEditor.App.DuplicatesWindow"
+        Title="Find Duplicates" Width="480" Height="540" MinWidth="380" MinHeight="380"
+        WindowStartupLocation="CenterOwner">
+  <DockPanel Margin="12">
+    <StackPanel DockPanel.Dock="Top" Spacing="8">
+      <TextBlock Text="Columns to compare (a row is a duplicate only if ALL match), e.g. A,C or B:D" TextWrapping="Wrap" />
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBox x:Name="ColumnsBox" />
+        <Button Grid.Column="1" Margin="8,0,0,0" Content="Find" IsDefault="True" Click="OnFindClick" />
+      </Grid>
+      <CheckBox x:Name="HeaderCheck" Content="First row is a header (skip it; copy it to the new sheet)" IsChecked="True" />
+      <TextBlock x:Name="SummaryText" FontWeight="SemiBold" TextWrapping="Wrap" />
+    </StackPanel>
+
+    <StackPanel DockPanel.Dock="Bottom" Spacing="6" Margin="0,10,0,0">
+      <TextBlock Text="Rows to act on:" />
+      <RadioButton x:Name="ExtrasRadio" GroupName="Scope" IsChecked="True" Content="Extras only — keep the first of each group" />
+      <RadioButton GroupName="Scope" Content="Every duplicate row (including the first)" />
+      <TextBox x:Name="SheetNameBox" Margin="0,4,0,0" PlaceholderText="New sheet name (blank = Duplicates, Duplicates 2, …)" />
+      <WrapPanel Orientation="Horizontal">
+        <Button x:Name="DeleteButton" Content="Delete rows" IsEnabled="False" Click="OnDeleteClick" Margin="0,0,8,0" />
+        <Button x:Name="CopyButton" Content="Copy to new sheet" IsEnabled="False" Click="OnCopyClick" Margin="0,0,8,0" />
+        <Button x:Name="MoveButton" Content="Move to new sheet" IsEnabled="False" Click="OnMoveClick" />
+      </WrapPanel>
+      <TextBlock x:Name="StatusText" TextWrapping="Wrap" Foreground="#555555" />
+    </StackPanel>
+
+    <!-- Click a group to jump to its first row in the sheet. -->
+    <ListBox x:Name="GroupList" SelectionChanged="OnGroupSelected" />
+  </DockPanel>
+</Window>
