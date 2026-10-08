@@ -1,7 +1,7 @@
 using ClosedXML.Excel;
-using XlsxEditor.Core;
+using OpenSheet.Core;
 
-namespace XlsxEditor.Core.Tests;
+namespace OpenSheet.Core.Tests;
 
 public class WorkbookDocumentTests
 {
@@ -271,6 +271,11 @@ public class WorkbookDocumentTests
                 Assert.Equal(new CellView("hello", "hello", false), doc.GetCell(0, 3, 1));
                 doc.SetCell(0, 4, 1, "'007");
                 Assert.Equal(new CellView("007", "007", false), doc.GetCell(0, 4, 1));
+                doc.SetCell(0, 6, 1, "1,234.5");
+                Assert.True(doc.GetCell(0, 6, 1).IsNumber); // real thousands grouping
+                doc.SetCell(0, 6, 1, "1,5");
+                Assert.False(doc.GetCell(0, 6, 1).IsNumber); // not "15"
+                doc.SetCell(0, 6, 1, "");
                 doc.SetCell(0, 5, 1, "TRUE");
                 Assert.Equal("TRUE", doc.GetCell(0, 5, 1).Text);
                 doc.SetCell(0, 3, 1, "");
@@ -652,6 +657,96 @@ public class WorkbookDocumentTests
             Assert.Equal(new CellView("42", "=A1*B1", true), doc.GetCell(0, 1, 3));
         }
         finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Csv_OpenEditSaveRoundTrip()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"report {Guid.NewGuid():N}.csv");
+        // Quotes, an escaped quote, a comma and a line break inside quotes, Thai text, numbers, a formula, BOM.
+        File.WriteAllText(path, "Name,City,Qty,Note\r\n\"Lee, Ann\",กรุงเทพ,3,\"say \"\"hi\"\"\"\r\nBob,\"Chiang\nMai\",4,=C2+C3\r\n",
+            new System.Text.UTF8Encoding(true));
+        try
+        {
+            using (var doc = WorkbookDocument.Open(path))
+            {
+                Assert.True(doc.IsCsv);
+                Assert.StartsWith("report ", doc.SheetNames[0]);
+                string T(int r, int c) => doc.GetCell(0, r, c).Text ?? "";
+                Assert.Equal(["Lee, Ann", "กรุงเทพ", "3", "say \"hi\""], Enumerable.Range(1, 4).Select(c => T(2, c)));
+                Assert.Equal("Chiang\nMai", T(3, 2));
+                Assert.True(doc.GetCell(0, 2, 3).IsNumber);
+                Assert.Equal("7", T(3, 4)); // =C2+C3 computed
+
+                doc.SetCell(0, 3, 3, "10");
+                doc.SaveAs(path); // stays CSV
+            }
+
+            var bytes = File.ReadAllBytes(path);
+            Assert.Equal([0xEF, 0xBB, 0xBF], bytes[..3]); // BOM so Excel reads Thai
+            var text = System.Text.Encoding.UTF8.GetString(bytes[3..]);
+            Assert.Equal("Name,City,Qty,Note\r\n\"Lee, Ann\",กรุงเทพ,3,\"say \"\"hi\"\"\"\r\nBob,\"Chiang\nMai\",10,13\r\n", text);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Csv_SemicolonAndLegacyThaiEncoding()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.csv");
+        System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+        File.WriteAllBytes(path, System.Text.Encoding.GetEncoding(874).GetBytes("ชื่อ;จำนวน\nสมชาย;1,5\n"));
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("th-TH");
+        try
+        {
+            using var doc = WorkbookDocument.Open(path);
+            Assert.Equal("ชื่อ", doc.GetCell(0, 1, 1).Text);
+            Assert.Equal("สมชาย", doc.GetCell(0, 2, 1).Text);
+            Assert.Equal("1,5", doc.GetCell(0, 2, 2).Text); // semicolon-separated, so the comma stays in the value
+
+            var saved = System.IO.Path.ChangeExtension(path, ".out.csv");
+            doc.SaveAs(saved);
+            Assert.StartsWith("ชื่อ;จำนวน", File.ReadAllText(saved)); // writes back with the same separator
+            File.Delete(saved);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = culture;
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Csv_AppendIntoWorkbookAndSaveXlsxAsCsv()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.xlsx");
+        var csv = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.csv");
+        using (var wb = new XLWorkbook())
+        {
+            var ws = wb.AddWorksheet("Data");
+            ws.Cell("A1").Value = "Name"; ws.Cell("B1").Value = "Qty";
+            ws.Cell("A2").Value = "Ann"; ws.Cell("B2").Value = 1;
+            wb.AddWorksheet("Other").Cell("A1").Value = "not exported";
+            wb.SaveAs(path);
+        }
+        File.WriteAllText(csv, "Name,Qty\nBob,2\n");
+        try
+        {
+            using var doc = WorkbookDocument.Open(path);
+            Assert.Equal((3, 1), doc.AppendRows(csv, 0, skipHeader: true));
+            Assert.Equal("Bob", doc.GetCell(0, 3, 1).Text);
+            Assert.True(doc.GetCell(0, 3, 2).IsNumber);
+
+            doc.SaveAs(csv, sheet: 0); // .xlsx → Save As .csv: just this sheet
+            Assert.True(doc.IsCsv);
+            Assert.Equal("Name,Qty\r\nAnn,1\r\nBob,2\r\n", File.ReadAllText(csv));
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(csv);
+        }
     }
 
     [Fact]

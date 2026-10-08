@@ -3,9 +3,9 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
-using XlsxEditor.Core;
+using OpenSheet.Core;
 
-namespace XlsxEditor.App.Controls;
+namespace OpenSheet.App.Controls;
 
 public enum GridArea { Cell, ColumnHeader, RowHeader, Corner }
 

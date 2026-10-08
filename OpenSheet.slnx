@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/OpenSheet.App/OpenSheet.App.csproj" />
+    <Project Path="src/OpenSheet.Core/OpenSheet.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OpenSheet.Core.Tests/OpenSheet.Core.Tests.csproj" />
+  </Folder>
+</Solution>

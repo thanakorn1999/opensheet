@@ -1,8 +1,8 @@
 using Avalonia.Controls;
 using Avalonia.Interactivity;
-using XlsxEditor.Core;
+using OpenSheet.Core;
 
-namespace XlsxEditor.App;
+namespace OpenSheet.App;
 
 /// <summary>Finds duplicate rows on the main window's current sheet, then deletes or moves them.</summary>
 public partial class DuplicatesWindow : Window

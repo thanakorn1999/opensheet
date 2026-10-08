@@ -13,5 +13,5 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - run: dotnet test tests/XlsxEditor.Core.Tests
-      - run: dotnet build src/XlsxEditor.App -c Release
+      - run: dotnet test tests/OpenSheet.Core.Tests
+      - run: dotnet build src/OpenSheet.App -c Release

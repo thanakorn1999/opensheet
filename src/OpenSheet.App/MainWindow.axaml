@@ -1,8 +1,8 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:c="using:XlsxEditor.App.Controls"
-        x:Class="XlsxEditor.App.MainWindow"
-        Title="XLSX Editor" Width="1100" Height="700" Icon="avares://XlsxEditor.App/Assets/icon.png"
+        xmlns:c="using:OpenSheet.App.Controls"
+        x:Class="OpenSheet.App.MainWindow"
+        Title="OpenSheet" Width="1100" Height="700" Icon="avares://OpenSheet.App/Assets/icon.png"
         DragDrop.AllowDrop="True">
   <Window.Styles>
     <!-- Fluent's tabs are headline-sized; sheet tabs should look like a status bar. -->

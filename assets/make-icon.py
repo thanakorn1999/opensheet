@@ -2,7 +2,7 @@
 
     python3 assets/make-icon.py
 
-Outputs into src/XlsxEditor.App/Assets/:
+Outputs into src/OpenSheet.App/Assets/:
   icon.png       1024px, used as the window icon
   app.ico        Windows exe icon (16..256)
   AppIcon.icns   macOS bundle icon (built with iconutil)
@@ -20,7 +20,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 S = 4  # supersampling: draw at 4096px, scale down for clean edges
 N = 1024 * S
-OUT = os.path.join(os.path.dirname(__file__), "..", "src", "XlsxEditor.App", "Assets")
+OUT = os.path.join(os.path.dirname(__file__), "..", "src", "OpenSheet.App", "Assets")
 
 
 def px(v):

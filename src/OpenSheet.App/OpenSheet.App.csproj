@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../XlsxEditor.Core/XlsxEditor.Core.csproj" />
+    <ProjectReference Include="../OpenSheet.Core/OpenSheet.Core.csproj" />
   </ItemGroup>
 
 </Project>

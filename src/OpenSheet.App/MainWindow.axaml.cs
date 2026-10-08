@@ -7,10 +7,10 @@ using Avalonia.Interactivity;
 using Avalonia.LogicalTree;
 using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
-using XlsxEditor.App.Controls;
-using XlsxEditor.Core;
+using OpenSheet.App.Controls;
+using OpenSheet.Core;
 
-namespace XlsxEditor.App;
+namespace OpenSheet.App;
 
 public partial class MainWindow : Window
 {
@@ -30,6 +30,16 @@ public partial class MainWindow : Window
     {
         Patterns = ["*.xlsx"],
         AppleUniformTypeIdentifiers = ["org.openxmlformats.spreadsheetml.sheet"],
+    };
+    static readonly FilePickerFileType CsvType = new("CSV (comma-separated values)")
+    {
+        Patterns = ["*.csv"],
+        AppleUniformTypeIdentifiers = ["public.comma-separated-values-text"],
+    };
+    static readonly FilePickerFileType SpreadsheetTypes = new("Spreadsheets (.xlsx, .csv)")
+    {
+        Patterns = ["*.xlsx", "*.csv"],
+        AppleUniformTypeIdentifiers = ["org.openxmlformats.spreadsheetml.sheet", "public.comma-separated-values-text"],
     };
 
     internal WorkbookDocument? Doc => _doc;
@@ -710,7 +720,7 @@ public partial class MainWindow : Window
         }
     }
 
-    void UpdateTitle() => Title = $"{(_dirty ? "• " : "")}{Path.GetFileName(_doc?.Path)} — XLSX Editor";
+    void UpdateTitle() => Title = $"{(_dirty ? "• " : "")}{Path.GetFileName(_doc?.Path)} — OpenSheet";
 
     /// <summary>Call after editing cells: marks the file unsaved and redraws in place.</summary>
     internal void MarkEdited()
@@ -799,8 +809,8 @@ public partial class MainWindow : Window
             {
                 Title = "Save workbook",
                 SuggestedFileName = Path.GetFileName(path) ?? "Book1.xlsx",
-                DefaultExtension = "xlsx",
-                FileTypeChoices = [XlsxType],
+                DefaultExtension = _doc.IsCsv ? "csv" : "xlsx",
+                FileTypeChoices = _doc.IsCsv ? [CsvType, XlsxType] : [XlsxType, CsvType],
             });
             path = file?.TryGetLocalPath();
             if (path is null) return;
@@ -808,10 +818,12 @@ public partial class MainWindow : Window
         try
         {
             // ponytail: saves on the UI thread so rendering never reads the workbook mid-save.
-            _doc.SaveAs(path);
+            _doc.SaveAs(path, CurrentSheet); // a .csv gets the current sheet
             _dirty = false;
             UpdateTitle();
-            StatusText.Text = $"Saved {Path.GetFileName(path)}";
+            StatusText.Text = _doc.IsCsv && _doc.SheetNames.Count > 1
+                ? $"Saved \"{_doc.SheetNames[CurrentSheet]}\" to {Path.GetFileName(path)}. CSV keeps one sheet and values only"
+                : $"Saved {Path.GetFileName(path)}";
         }
         catch (Exception ex)
         {
@@ -826,7 +838,7 @@ public partial class MainWindow : Window
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
             Title = "Open workbook",
-            FileTypeFilter = [XlsxType],
+            FileTypeFilter = [SpreadsheetTypes, XlsxType, CsvType],
         });
         if (files is [var file, ..] && file.TryGetLocalPath() is { } path) await OpenAsync(path);
     }
@@ -848,7 +860,7 @@ public partial class MainWindow : Window
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
             Title = "Import from workbook",
-            FileTypeFilter = [XlsxType],
+            FileTypeFilter = [SpreadsheetTypes, XlsxType, CsvType],
         });
         if (files is [var file, ..] && file.TryGetLocalPath() is { } path) await AddFileAsync(path);
     }

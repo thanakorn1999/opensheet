@@ -3,7 +3,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform.Storage;
 
-namespace XlsxEditor.App;
+namespace OpenSheet.App;
 
 public partial class App : Application
 {

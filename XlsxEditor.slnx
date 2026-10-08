@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/XlsxEditor.App/XlsxEditor.App.csproj" />
-    <Project Path="src/XlsxEditor.Core/XlsxEditor.Core.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/XlsxEditor.Core.Tests/XlsxEditor.Core.Tests.csproj" />
-  </Folder>
-</Solution>

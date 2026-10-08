@@ -1,7 +1,7 @@
 using System.Globalization;
 using ClosedXML.Excel;
 
-namespace XlsxEditor.Core;
+namespace OpenSheet.Core;
 
 /// <summary>Display data for one cell. Row/column are 1-based like Excel.</summary>
 public readonly record struct CellView(string Text, string Content, bool IsNumber);
@@ -27,22 +27,53 @@ public sealed class WorkbookDocument : IDisposable
 
     public string? Path { get; private set; }
 
+    char _csvDelimiter = ','; // kept from an opened .csv so saving writes the same format back
+
     public static WorkbookDocument Open(string path)
     {
-        var wb = new XLWorkbook(path);
+        var wb = Load(path, out var delimiter);
         // Files from tools that don't store formula results (openpyxl, some exports) come with blank results:
         // compute those. Results Excel stored are kept, so functions ClosedXML can't evaluate still show right.
         foreach (var ws in wb.Worksheets)
             foreach (var cell in ws.CellsUsed(XLCellsUsedOptions.All, c => c.HasFormula && c.CachedValue.IsBlank))
                 cell.InvalidateFormula();
-        return new(wb, path);
+        return new(wb, path) { _csvDelimiter = delimiter };
     }
 
-    public void SaveAs(string path)
+    /// <summary>Loads an .xlsx, or a .csv as a one-sheet workbook named after the file.</summary>
+    static XLWorkbook Load(string path, out char delimiter)
     {
-        _wb.SaveAs(path);
+        delimiter = ',';
+        if (!Csv.IsCsv(path)) return new XLWorkbook(path);
+
+        var text = Csv.ReadText(path);
+        delimiter = Csv.DetectDelimiter(text);
+        var wb = new XLWorkbook();
+        var name = string.Concat(System.IO.Path.GetFileNameWithoutExtension(path).Select(ch => "\\/?*[]:".Contains(ch) ? '_' : ch)).Trim('\'', ' ');
+        var ws = wb.AddWorksheet(name.Length == 0 ? "Sheet1" : name[..Math.Min(name.Length, 31)]);
+        var rows = Csv.Parse(text, delimiter);
+        for (int r = 0; r < rows.Count; r++)
+            for (int c = 0; c < rows[r].Count; c++)
+                Put(ws.Cell(r + 1, c + 1), rows[r][c]); // "42" becomes a number, "=A1*2" a formula, like Excel
+        return wb;
+    }
+
+    /// <summary>
+    /// Saves as .xlsx, or as .csv when the path ends in .csv. A CSV holds one sheet (<paramref name="sheet"/>)
+    /// and only its displayed values, like Excel.
+    /// </summary>
+    public void SaveAs(string path, int sheet = 0)
+    {
+        if (Csv.IsCsv(path))
+        {
+            var (rows, cols) = UsedSize(sheet);
+            Csv.Write(path, Enumerable.Range(1, rows).Select(r => Enumerable.Range(1, cols).Select(c => GetCell(sheet, r, c).Text ?? "")), _csvDelimiter);
+        }
+        else _wb.SaveAs(path);
         Path = path;
     }
+
+    public bool IsCsv => Path is not null && Csv.IsCsv(Path);
 
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
@@ -220,15 +251,29 @@ public sealed class WorkbookDocument : IDisposable
         return (rows, cols);
     }
 
-    void Put(int sheet, int row, int col, string input)
+    void Put(int sheet, int row, int col, string input) => Put(Sheet(sheet).Cell(row, col), input);
+
+    static void Put(IXLCell cell, string input)
     {
-        var cell = Sheet(sheet).Cell(row, col);
         if (input.Length == 0) cell.Value = Blank.Value;
         else if (input.Length > 1 && input[0] == '=') cell.FormulaA1 = input[1..];
         else if (input[0] == '\'') cell.Value = input[1..];
-        else if (double.TryParse(input, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.CurrentCulture, out var number)) cell.Value = number;
+        else if (TryParseNumber(input, out var number)) cell.Value = number;
         else if (bool.TryParse(input, out var flag)) cell.Value = flag;
         else cell.Value = input;
+    }
+
+    /// <summary>
+    /// A number in the user's format. Thousands separators count only when they really group by threes
+    /// ("1,234.5"), so "1,5" stays text instead of turning into 15.
+    /// </summary>
+    static bool TryParseNumber(string input, out double number)
+    {
+        var nf = CultureInfo.CurrentCulture.NumberFormat;
+        if (double.TryParse(input, NumberStyles.Float, nf, out number)) return true;
+        string g = System.Text.RegularExpressions.Regex.Escape(nf.NumberGroupSeparator), d = System.Text.RegularExpressions.Regex.Escape(nf.NumberDecimalSeparator);
+        return System.Text.RegularExpressions.Regex.IsMatch(input.Trim(), $@"^[+-]?\d{{1,3}}({g}\d{{3}})+({d}\d+)?$")
+            && double.TryParse(input, NumberStyles.Float | NumberStyles.AllowThousands, nf, out number);
     }
 
     /// <summary>
@@ -380,7 +425,7 @@ public sealed class WorkbookDocument : IDisposable
     /// </summary>
     public IReadOnlyList<string> ImportSheets(string path, int index)
     {
-        using var other = new XLWorkbook(path);
+        using var other = Load(path, out _);
         return Edit(SnapshotStep, () =>
         {
             var names = new List<string>();
@@ -407,7 +452,7 @@ public sealed class WorkbookDocument : IDisposable
     // ponytail: matches columns by position, not by header name.
     public (int FirstRow, int Count) AppendRows(string path, int sheet, bool skipHeader)
     {
-        using var other = new XLWorkbook(path);
+        using var other = Load(path, out _);
         return Edit(SnapshotStep, () =>
         {
             var dst = Sheet(sheet);

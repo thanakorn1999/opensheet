@@ -15,7 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../src/XlsxEditor.Core/XlsxEditor.Core.csproj" />
+    <ProjectReference Include="../../src/OpenSheet.Core/OpenSheet.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

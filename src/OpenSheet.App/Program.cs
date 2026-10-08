@@ -1,6 +1,6 @@
 using Avalonia;
 
-namespace XlsxEditor.App;
+namespace OpenSheet.App;
 
 static class Program
 {
