@@ -27,7 +27,16 @@ public sealed class WorkbookDocument : IDisposable
 
     public string? Path { get; private set; }
 
-    public static WorkbookDocument Open(string path) => new(new XLWorkbook(path), path);
+    public static WorkbookDocument Open(string path)
+    {
+        var wb = new XLWorkbook(path);
+        // Files from tools that don't store formula results (openpyxl, some exports) come with blank results:
+        // compute those. Results Excel stored are kept, so functions ClosedXML can't evaluate still show right.
+        foreach (var ws in wb.Worksheets)
+            foreach (var cell in ws.CellsUsed(XLCellsUsedOptions.All, c => c.HasFormula && c.CachedValue.IsBlank))
+                cell.InvalidateFormula();
+        return new(wb, path);
+    }
 
     public void SaveAs(string path)
     {
@@ -362,6 +371,56 @@ public sealed class WorkbookDocument : IDisposable
         {
             _wb.AddWorksheet(name).Position = index + 1;
             return name;
+        });
+    }
+
+    /// <summary>
+    /// Copies every sheet of another .xlsx into this workbook, starting at <paramref name="index"/> (0-based).
+    /// Names that are taken get " (2)", " (3)", … One undo step. Returns the new sheets' names.
+    /// </summary>
+    public IReadOnlyList<string> ImportSheets(string path, int index)
+    {
+        using var other = new XLWorkbook(path);
+        return Edit(SnapshotStep, () =>
+        {
+            var names = new List<string>();
+            foreach (var src in other.Worksheets.OrderBy(ws => ws.Position))
+            {
+                var name = NewSheetName(null, i =>
+                {
+                    if (i == 1) return src.Name;
+                    var suffix = $" ({i})";
+                    return src.Name[..Math.Min(src.Name.Length, 31 - suffix.Length)] + suffix;
+                });
+                src.CopyTo(_wb, name).Position = index + names.Count + 1;
+                names.Add(name);
+            }
+            return (IReadOnlyList<string>)names;
+        });
+    }
+
+    /// <summary>
+    /// Appends the rows of every sheet in another .xlsx below the data of <paramref name="sheet"/>, column A to A.
+    /// <paramref name="skipHeader"/> leaves out each source sheet's first row. One undo step.
+    /// Returns the first appended row and how many rows were added.
+    /// </summary>
+    // ponytail: matches columns by position, not by header name.
+    public (int FirstRow, int Count) AppendRows(string path, int sheet, bool skipHeader)
+    {
+        using var other = new XLWorkbook(path);
+        return Edit(SnapshotStep, () =>
+        {
+            var dst = Sheet(sheet);
+            int first = UsedSize(sheet).Rows + 1, next = first;
+            foreach (var src in other.Worksheets.OrderBy(ws => ws.Position))
+            {
+                if (src.LastCellUsed() is not { } last) continue;
+                int top = skipHeader ? 2 : 1, rows = last.Address.RowNumber - top + 1;
+                if (rows <= 0) continue;
+                src.Range(top, 1, last.Address.RowNumber, last.Address.ColumnNumber).CopyTo(dst.Cell(next, 1));
+                next += rows;
+            }
+            return (first, next - first);
         });
     }
 

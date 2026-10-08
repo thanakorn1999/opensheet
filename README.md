@@ -1,49 +1,74 @@
+<div align="center">
+
+<img src="src/XlsxEditor.App/Assets/icon.png" width="128" alt="XLSX Editor icon">
+
 # XLSX Editor
 
-A small desktop app for opening, editing and saving `.xlsx` files on macOS and Windows, with no Microsoft Excel needed. Built with [Avalonia](https://avaloniaui.net/) and [ClosedXML](https://github.com/ClosedXML/ClosedXML). Everything runs locally and nothing is uploaded.
+**A fast, free, open-source `.xlsx` editor for macOS and Windows. No Microsoft Excel, no account, no cloud.**
+
+[![CI](https://github.com/thanakorn1999/xlsx-editor/actions/workflows/ci.yml/badge.svg)](https://github.com/thanakorn1999/xlsx-editor/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/thanakorn1999/xlsx-editor?color=1a9a5b)](https://github.com/thanakorn1999/xlsx-editor/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-1a9a5b.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
+![.NET 10](https://img.shields.io/badge/.NET-10-512BD4)
+
+[**Download**](#download) · [Features](#features) · [Shortcuts](#keyboard-shortcuts) · [Build from source](#build-from-source)
+
+<img src="docs/screenshot.png" width="820" alt="XLSX Editor showing a sales sheet with a selected range and computed totals">
+
+</div>
+
+Open a spreadsheet, fix it, clean up duplicates, save it. XLSX Editor is a lightweight desktop app for everyday `.xlsx` work. It opens quickly, runs entirely on your computer, and never uploads your files.
+
+## Download
+
+Get the latest build from **[Releases](https://github.com/thanakorn1999/xlsx-editor/releases/latest)**:
+
+| Platform | File |
+|---|---|
+| macOS, Apple Silicon (M1–M4) | [`XLSX-Editor-macOS-arm64.zip`](https://github.com/thanakorn1999/xlsx-editor/releases/latest/download/XLSX-Editor-macOS-arm64.zip) |
+| macOS, Intel | [`XLSX-Editor-macOS-x64.zip`](https://github.com/thanakorn1999/xlsx-editor/releases/latest/download/XLSX-Editor-macOS-x64.zip) |
+| Windows 10/11 (64-bit) | [`XLSX-Editor-Windows-x64.zip`](https://github.com/thanakorn1999/xlsx-editor/releases/latest/download/XLSX-Editor-Windows-x64.zip) |
+
+Everything is bundled, so you don't need to install .NET.
+
+<details>
+<summary><b>macOS says the app "can't be opened" or "is damaged"</b></summary>
+
+The app isn't notarized by Apple yet. Move it to Applications, then either right-click it → **Open** → **Open**, or run:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/XLSX Editor.app"
+```
+</details>
+
+<details>
+<summary><b>Windows shows "Windows protected your PC"</b></summary>
+
+The exe isn't code-signed yet. Click **More info** → **Run anyway**.
+</details>
 
 ## Features
 
-- Open (menu, Cmd/Ctrl+O or drag & drop), Save and Save As
-- Edit cells in place. Formulas work too (`=SUM(A1:A10)`): while typing one, click a cell to insert its address
-- Undo / redo, cut / copy / paste (paste a tab-separated block from Excel or Google Sheets)
-- Find text across the sheet
-- Find duplicate rows by one or more columns, then delete them, keep one of each, or copy or move them to a new sheet
-- Select ranges, whole columns or rows by clicking/dragging the headers, or everything with Cmd/Ctrl+A
-- Right-click cells, headers and sheet tabs for the common actions
-- Insert/delete rows and columns; add (**+** next to the tabs), rename (double-click the tab), duplicate, delete and reorder sheets
+**Editing**
+- Edit right in the cell: start typing, double-click, or press F2
+- Formulas (`=SUM(B:B)`, `=D2*E2`, …). While typing one, **click or drag** cells, column headers or row headers to insert the reference
+- Undo / redo for everything, including deleted rows and sheets
+- Cut, copy and paste ranges. Formulas shift like in Excel, and paste works with blocks copied from Excel or Google Sheets
 
-## Run
+**Selecting and navigating**
+- Click or drag column and row headers to select whole columns or rows; drag or Shift+click to select ranges; Cmd/Ctrl+A for everything
+- Cmd/Ctrl+Arrow jumps to the edge of the data; Find (Cmd/Ctrl+F) searches the sheet
+- Right-click menus on cells, headers and sheet tabs
 
-Needs the [.NET 10 SDK](https://dotnet.microsoft.com/download).
+**Cleaning data**
+- **Find duplicates** by one or more columns. Matching rows are highlighted, then you can delete them all, keep one of each, or copy or move them to a new sheet
+- Insert and delete rows and columns. Formulas and hyperlinks follow
 
-```bash
-dotnet run --project src/XlsxEditor.App
-dotnet test   # core tests
-```
-
-## Build an app
-
-Both builds are self-contained, so the target computer doesn't need .NET.
-
-**macOS** produces `publish/XLSX Editor.app`:
-
-```bash
-./build-mac.sh            # build
-./build-mac.sh --install  # build and copy to /Applications
-```
-
-To make it the default for `.xlsx` files, select any `.xlsx` in Finder, open Get Info (Cmd+I), set **Open with** to *XLSX Editor*, then click **Change All…**.
-The app is signed ad-hoc but not notarized. On a Mac other than the one that built it, open it the first time with right-click → Open.
-
-**Windows** produces one `.exe` in `publish/win` (this also works when run from a Mac):
-
-```bash
-dotnet publish src/XlsxEditor.App -c Release -r win-x64 --self-contained \
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/win
-```
-
-To open `.xlsx` files with it, right-click a file → Open with → Choose another app → browse to `XlsxEditor.App.exe` → Always.
+**Sheets and files**
+- Add, rename (double-click the tab), duplicate, delete, and **drag tabs to reorder** sheets
+- Drop another `.xlsx` onto the window to open it, **import its sheets**, or **append its rows** to the current sheet
+- Open from Finder or Explorer, drag & drop, Save / Save As. The app asks before you lose unsaved changes
 
 ## Keyboard shortcuts
 
@@ -54,7 +79,7 @@ Cmd on macOS, Ctrl on Windows.
 | Cmd+O / Cmd+S / Cmd+Shift+S | Open / Save / Save As |
 | Cmd+Z / Cmd+Shift+Z (or Cmd+Y) | Undo / Redo |
 | Cmd+X / Cmd+C / Cmd+V | Cut / Copy / Paste |
-| Delete or Backspace | Clear cell |
+| Delete or Backspace | Clear selection |
 | Type, F2, or double-click | Edit cell |
 | Enter / Tab (+Shift to go back) | Save the edit and move down / right |
 | Esc | Cancel the edit or close a bar |
@@ -67,12 +92,51 @@ Cmd on macOS, Ctrl on Windows.
 | Shift+F11 | New sheet |
 | Cmd+F, then Enter / Shift+Enter | Find next / previous |
 
-## Project layout
+## Build from source
 
-- `src/XlsxEditor.Core`: workbook logic (no UI). Wraps ClosedXML.
-- `src/XlsxEditor.App`: Avalonia desktop app.
-- `tests/XlsxEditor.Core.Tests`: xUnit tests for the core.
+Needs the [.NET 10 SDK](https://dotnet.microsoft.com/download).
+
+```bash
+git clone https://github.com/thanakorn1999/xlsx-editor.git
+cd xlsx-editor
+dotnet run --project src/XlsxEditor.App   # run it
+dotnet test                               # run the tests
+```
+
+**macOS app** (`publish/XLSX Editor.app`):
+
+```bash
+./build-mac.sh             # build for this Mac
+./build-mac.sh --install   # build and copy to /Applications
+RID=osx-x64 ./build-mac.sh # build for Intel Macs
+```
+
+To make it the default for `.xlsx`, select any `.xlsx` in Finder, press Cmd+I, set **Open with** to *XLSX Editor*, then click **Change All…**.
+
+**Windows exe** (one file in `publish/win`; this also works when run from a Mac or Linux):
+
+```bash
+dotnet publish src/XlsxEditor.App -c Release -r win-x64 --self-contained \
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/win
+```
+
+The app icon is generated by `python3 assets/make-icon.py` (needs Pillow).
+
+## How it works
+
+- `src/XlsxEditor.Core` holds the workbook logic, with no UI. It wraps [ClosedXML](https://github.com/ClosedXML/ClosedXML) and handles undo, ranges, duplicates and import.
+- `src/XlsxEditor.App` is the [Avalonia](https://avaloniaui.net/) desktop app. The grid draws only the visible cells, so large sheets stay smooth.
+- `tests/XlsxEditor.Core.Tests` has the xUnit tests that run on every push.
+
+## Limitations
+
+Not there yet:
+- Formatting tools (bold, colors, number formats). Existing formatting is kept when you save
+- Real column widths and row heights
+- Charts, pivot tables and images. ClosedXML may not keep all of them when saving, so use **Save As** on files that have them
+
+Issues and pull requests are welcome.
 
 ## License
 
-[MIT](LICENSE). Third-party packages keep their own licenses (Avalonia and ClosedXML are both MIT).
+[MIT](LICENSE). Avalonia and ClosedXML are MIT-licensed too.

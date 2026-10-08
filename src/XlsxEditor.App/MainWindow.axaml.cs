@@ -61,6 +61,16 @@ public partial class MainWindow : Window
         SheetTabs.DoubleTapped += (_, _) => RenameCurrentSheet();
         Sheet.ContextRequested += OnSheetContextRequested;
         SheetTabs.ContextRequested += OnTabsContextRequested;
+        // A plain mouse wheel only scrolls vertically; turn it sideways for the tab row.
+        TabScroller.AddHandler(PointerWheelChangedEvent, (_, e) =>
+        {
+            if (e.Delta.Y == 0 || e.Delta.X != 0) return; // trackpads already send sideways deltas
+            ScrollTabs(-e.Delta.Y * 60);
+            e.Handled = true;
+        }, RoutingStrategies.Tunnel);
+        SheetTabs.AddHandler(PointerPressedEvent, OnTabPointerPressed, RoutingStrategies.Tunnel);
+        SheetTabs.AddHandler(PointerMovedEvent, OnTabPointerMoved, RoutingStrategies.Tunnel);
+        SheetTabs.AddHandler(PointerReleasedEvent, OnTabPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
 
         // Menus are written with Ctrl; macOS users expect Cmd. (OnKeyDown accepts either.)
         if (OperatingSystem.IsMacOS())
@@ -452,13 +462,57 @@ public partial class MainWindow : Window
         StatusText.Text = $"Deleted sheet \"{name}\" (Cmd/Ctrl+Z to undo)";
     });
 
-    void MoveSheet(int delta) => Try(() =>
+    void MoveSheet(int delta) => MoveSheet(CurrentSheet, CurrentSheet + delta);
+
+    void MoveSheet(int from, int to) => Try(() =>
     {
-        int to = Math.Clamp(CurrentSheet + delta, 0, _doc!.SheetNames.Count - 1);
-        if (to == CurrentSheet) return;
-        _doc.MoveSheet(CurrentSheet, to);
+        to = Math.Clamp(to, 0, _doc!.SheetNames.Count - 1);
+        if (to == from) return;
+        _doc.MoveSheet(from, to);
         Reload(to);
+        StatusText.Text = "";
     });
+
+    // ---- Drag a sheet tab to reorder ----
+
+    (int From, Point Start, bool Dragging)? _tabDrag;
+
+    int TabIndexAt(Visual? v) =>
+        v?.FindAncestorOfType<TabStripItem>(includeSelf: true) is { } tab ? SheetTabs.IndexFromContainer(tab) : -1;
+
+    void OnTabPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(SheetTabs).Properties.IsLeftButtonPressed) return;
+        int index = TabIndexAt(e.Source as Visual);
+        _tabDrag = index >= 0 ? (index, e.GetPosition(SheetTabs), false) : null; // tab still gets selected as usual
+    }
+
+    void OnTabPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (_tabDrag is not { } d || d.Dragging) return;
+        var delta = e.GetPosition(SheetTabs) - d.Start;
+        if (Math.Abs(delta.X) < 6 && Math.Abs(delta.Y) < 6) return; // a click, not a drag (yet)
+        _tabDrag = d with { Dragging = true };
+        e.Pointer.Capture(SheetTabs);
+        SheetTabs.Cursor = new Cursor(StandardCursorType.DragMove);
+        StatusText.Text = $"Moving \"{_doc?.SheetNames[d.From]}\" — drop it on another tab";
+    }
+
+    void OnTabPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (_tabDrag is not { } d) return;
+        _tabDrag = null;
+        if (!d.Dragging) return;
+        e.Pointer.Capture(null);
+        SheetTabs.Cursor = null;
+        StatusText.Text = "";
+        // Dropped on a tab: take its place. Past the last tab: go to the end.
+        var pos = e.GetPosition(SheetTabs);
+        int to = TabIndexAt(SheetTabs.InputHitTest(pos) as Visual);
+        if (to < 0 && pos.X > SheetTabs.Bounds.Width) to = SheetTabs.ItemCount - 1;
+        if (to >= 0) MoveSheet(d.From, to);
+        e.Handled = true;
+    }
 
     void OnNewSheetClick(object? sender, RoutedEventArgs e) => NewSheet();
     void OnDeleteSheetClick(object? sender, RoutedEventArgs e) => DeleteSheet();
@@ -605,17 +659,19 @@ public partial class MainWindow : Window
         }
     }
 
+    static Window NewDialog(string title) => new()
+    {
+        Title = title,
+        SizeToContent = SizeToContent.WidthAndHeight,
+        CanResize = false,
+        WindowStartupLocation = WindowStartupLocation.CenterOwner,
+    };
+
     /// <summary>Save / Don't Save / Cancel → true / false / null.</summary>
     async Task<bool?> AskSaveAsync()
     {
         bool? result = null;
-        var dialog = new Window
-        {
-            Title = "Unsaved changes",
-            SizeToContent = SizeToContent.WidthAndHeight,
-            CanResize = false,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
-        };
+        var dialog = NewDialog("Unsaved changes");
         Button Choice(string text, bool? value, bool isDefault = false)
         {
             var b = new Button { Content = text, IsDefault = isDefault, IsCancel = value is null };
@@ -703,7 +759,18 @@ public partial class MainWindow : Window
         else PlaceEditor(); // follow the cell when scrolling
     }
 
-    void OnSheetChanged(object? sender, SelectionChangedEventArgs e) => ShowSheet(SheetTabs.SelectedIndex);
+    void OnSheetChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        ShowSheet(SheetTabs.SelectedIndex);
+        // Keep the selected tab visible (after layout, so a new tab has a size).
+        Avalonia.Threading.Dispatcher.UIThread.Post(() => SheetTabs.ContainerFromIndex(SheetTabs.SelectedIndex)?.BringIntoView());
+    }
+
+    void ScrollTabs(double dx) => TabScroller.Offset = TabScroller.Offset.WithX(
+        Math.Clamp(TabScroller.Offset.X + dx, 0, Math.Max(0, TabScroller.Extent.Width - TabScroller.Viewport.Width)));
+
+    void OnTabsLeftClick(object? sender, RoutedEventArgs e) => ScrollTabs(-200);
+    void OnTabsRightClick(object? sender, RoutedEventArgs e) => ScrollTabs(200);
 
     void OnFindDuplicatesClick(object? sender, RoutedEventArgs e)
     {
@@ -766,7 +833,106 @@ public partial class MainWindow : Window
 
     async void OnDrop(object? sender, DragEventArgs e)
     {
-        if (e.DataTransfer.TryGetFiles() is [var file, ..] && file.TryGetLocalPath() is { } path) await OpenAsync(path);
+        if (e.DataTransfer.TryGetFiles() is not [var file, ..] || file.TryGetLocalPath() is not { } path) return;
+        if (_doc is null) await OpenAsync(path);
+        else await AddFileAsync(path); // a file is already open: ask what to do with this one
+    }
+
+    async void OnImportClick(object? sender, RoutedEventArgs e)
+    {
+        if (_doc is null)
+        {
+            await PickAndOpenAsync();
+            return;
+        }
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Import from workbook",
+            FileTypeFilter = [XlsxType],
+        });
+        if (files is [var file, ..] && file.TryGetLocalPath() is { } path) await AddFileAsync(path);
+    }
+
+    enum AddMode { Open, ImportSheets, AppendRows }
+
+    /// <summary>Another .xlsx while one is open: open it instead, import its sheets, or append its rows here.</summary>
+    async Task AddFileAsync(string path)
+    {
+        if (_doc is null || CurrentSheet < 0) return;
+        if (await AskAddModeAsync(Path.GetFileName(path), _doc.SheetNames[CurrentSheet]) is not { } choice) return;
+        if (choice.Mode == AddMode.Open)
+        {
+            await OpenAsync(path);
+            return;
+        }
+        CommitEdit();
+        StatusText.Text = "Importing…";
+        try
+        {
+            if (choice.Mode == AddMode.ImportSheets)
+            {
+                int index = CurrentSheet + 1;
+                var names = _doc.ImportSheets(path, index);
+                Reload(index); // show the first imported sheet
+                StatusText.Text = $"Imported {names.Count} sheet(s) from {Path.GetFileName(path)}: {string.Join(", ", names)}";
+            }
+            else
+            {
+                var (first, count) = _doc.AppendRows(path, CurrentSheet, choice.SkipHeader);
+                MarkEdited();
+                if (count > 0)
+                {
+                    Sheet.Select(first, 1);
+                    Sheet.SelectRows(first, first + count - 1); // show what was added
+                }
+                StatusText.Text = $"Appended {count} row(s) from {Path.GetFileName(path)}";
+            }
+        }
+        catch (Exception ex) { StatusText.Text = $"Cannot import: {ex.Message}"; }
+    }
+
+    async Task<(AddMode Mode, bool SkipHeader)?> AskAddModeAsync(string fileName, string sheetName)
+    {
+        (AddMode, bool)? result = null;
+        var dialog = NewDialog("Add workbook");
+        var skipHeader = new CheckBox { Content = "Its first row is a header — don't append it", IsChecked = true, Margin = new Thickness(24, 0, 0, 0) };
+        Control Option(string title, string detail, AddMode mode)
+        {
+            var b = new Button
+            {
+                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
+                Padding = new Thickness(12, 8),
+                Content = new StackPanel
+                {
+                    Children =
+                    {
+                        new TextBlock { Text = title, FontWeight = Avalonia.Media.FontWeight.SemiBold },
+                        new TextBlock { Text = detail, Opacity = 0.7, TextWrapping = Avalonia.Media.TextWrapping.Wrap },
+                    },
+                },
+            };
+            b.Click += (_, _) => { result = (mode, skipHeader.IsChecked == true); dialog.Close(); };
+            return b;
+        }
+        var cancel = new Button { Content = "Cancel", IsCancel = true, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right };
+        cancel.Click += (_, _) => dialog.Close();
+        dialog.Content = new StackPanel
+        {
+            Margin = new Thickness(20),
+            Spacing = 10,
+            Width = 420,
+            Children =
+            {
+                new TextBlock { Text = $"What do you want to do with \"{fileName}\"?", FontWeight = Avalonia.Media.FontWeight.SemiBold },
+                Option("Open it", "Switch to that file (asks to save this one first if needed).", AddMode.Open),
+                Option("Import its sheets", "Add every sheet from it as new sheets in this workbook.", AddMode.ImportSheets),
+                Option($"Append its rows to \"{sheetName}\"", "Add its data below the last row of this sheet, column A to A.", AddMode.AppendRows),
+                skipHeader,
+                cancel,
+            },
+        };
+        await dialog.ShowDialog(this);
+        return result;
     }
 
     protected override async void OnKeyDown(KeyEventArgs e)

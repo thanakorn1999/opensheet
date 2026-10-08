@@ -564,6 +564,97 @@ public class WorkbookDocumentTests
     }
 
     [Fact]
+    public void ImportSheetsAndAppendRows_FromAnotherFile()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.xlsx");
+        var otherPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.xlsx");
+        using (var wb = new XLWorkbook())
+        {
+            var ws = wb.AddWorksheet("Sales");
+            ws.Cell("A1").Value = "Name"; ws.Cell("B1").Value = "Qty";
+            ws.Cell("A2").Value = "Ann"; ws.Cell("B2").Value = 1;
+            wb.AddWorksheet("Notes");
+            wb.SaveAs(path);
+        }
+        using (var wb = new XLWorkbook())
+        {
+            var a = wb.AddWorksheet("Sales"); // name clash
+            a.Cell("A1").Value = "Name"; a.Cell("B1").Value = "Qty";
+            a.Cell("A2").Value = "Bob"; a.Cell("B2").Value = 2;
+            a.Cell("C2").FormulaA1 = "B2*10";
+            a.Cell("A2").Style.Font.Bold = true;
+            var b = wb.AddWorksheet("May");
+            b.Cell("A1").Value = "Name"; b.Cell("B1").Value = "Qty";
+            b.Cell("A2").Value = "Cat"; b.Cell("B2").Value = 3;
+            b.Cell("A3").Value = "Dan"; b.Cell("B3").Value = 4;
+            wb.SaveAs(otherPath);
+        }
+
+        try
+        {
+            using (var doc = WorkbookDocument.Open(path))
+            {
+                Assert.Equal(["Sales (2)", "May"], doc.ImportSheets(otherPath, 1));
+                Assert.Equal(["Sales", "Sales (2)", "May", "Notes"], doc.SheetNames);
+                Assert.Equal("Bob", doc.GetCell(1, 2, 1).Text);
+                Assert.Equal("=B2*10", doc.GetCell(1, 2, 3).Content);
+                Assert.True(doc.Undo());
+                Assert.Equal(["Sales", "Notes"], doc.SheetNames);
+
+                Assert.Equal((3, 3), doc.AppendRows(otherPath, 0, skipHeader: true));
+                string Row(int r) => string.Join("|", Enumerable.Range(1, 3).Select(c => doc.GetCell(0, r, c).Text ?? ""));
+                Assert.Equal(["Name|Qty|", "Ann|1|", "Bob|2|20", "Cat|3|", "Dan|4|"], Enumerable.Range(1, 5).Select(Row));
+                Assert.Equal("=B3*10", doc.GetCell(0, 3, 3).Content); // relative formula follows its row
+                doc.SaveAs(path);
+            }
+
+            using var wb2 = new XLWorkbook(path);
+            Assert.True(wb2.Worksheet("Sales").Cell("A3").Style.Font.Bold); // formatting comes along
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(otherPath);
+        }
+    }
+
+    [Fact]
+    public void Open_ComputesFormulasThatHaveNoStoredResult()
+    {
+        // openpyxl and some exporters write <f> without a cached <v>; those cells must not show blank.
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"{Guid.NewGuid()}.xlsx");
+        using (var wb = new XLWorkbook())
+        {
+            var ws = wb.AddWorksheet("S");
+            ws.Cell("A1").Value = 6;
+            ws.Cell("B1").Value = 7;
+            ws.Cell("C1").FormulaA1 = "A1*B1";
+            wb.SaveAs(path);
+        }
+        using (var zip = System.IO.Compression.ZipFile.Open(path, System.IO.Compression.ZipArchiveMode.Update))
+        {
+            var entry = zip.GetEntry("xl/worksheets/sheet1.xml")!;
+            string xml;
+            using (var r = new StreamReader(entry.Open())) xml = r.ReadToEnd();
+            // Make the formula cell look exactly like openpyxl's: <f>…</f><v /> (an empty stored result).
+            var openpyxlStyle = System.Text.RegularExpressions.Regex.Replace(xml,
+                "<(\\w+:)?f>([^<]*)</(?:\\w+:)?f>(?:<(?:\\w+:)?v>[^<]*</(?:\\w+:)?v>)?", "<$1f>$2</$1f><$1v />");
+            Assert.NotEqual(xml, openpyxlStyle);
+            xml = openpyxlStyle;
+            entry.Delete();
+            using var w = new StreamWriter(zip.CreateEntry("xl/worksheets/sheet1.xml").Open());
+            w.Write(xml);
+        }
+
+        try
+        {
+            using var doc = WorkbookDocument.Open(path);
+            Assert.Equal(new CellView("42", "=A1*B1", true), doc.GetCell(0, 1, 3));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void ParseColumns_ListsAndRanges()
     {
         Assert.Equal([1, 3], WorkbookDocument.ParseColumns("A,C"));

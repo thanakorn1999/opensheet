@@ -6,7 +6,7 @@ set -e
 cd "$(dirname "$0")"
 
 DOTNET=$(command -v dotnet || echo "$HOME/.dotnet/dotnet")
-RID=osx-$([ "$(uname -m)" = arm64 ] && echo arm64 || echo x64)
+RID=${RID:-osx-$([ "$(uname -m)" = arm64 ] && echo arm64 || echo x64)} # override: RID=osx-x64 ./build-mac.sh
 NAME="XLSX Editor"
 APP="publish/$NAME.app"
 VERSION=1.0.0
@@ -14,8 +14,9 @@ VERSION=1.0.0
 rm -rf publish
 "$DOTNET" publish src/XlsxEditor.App -c Release -r "$RID" --self-contained -o publish/bin
 
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp -R publish/bin/. "$APP/Contents/MacOS/"
+cp src/XlsxEditor.App/Assets/AppIcon.icns "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -29,6 +30,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <!-- Lets Finder offer this app for .xlsx (Open With, Get Info → Change All). -->
   <key>CFBundleDocumentTypes</key>
   <array>
